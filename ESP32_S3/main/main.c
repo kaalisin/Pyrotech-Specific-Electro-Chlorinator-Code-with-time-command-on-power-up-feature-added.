@@ -37,10 +37,6 @@
 // REGENERATION SUSPEND AND RESUME IS REQUIRED OR NOT
 #define REGENERATION_SUSPEND_RESUME_REQ 							(0u)
 
-
-// RESET MACROS
-#define RESET_COMMAND_REQ 			  (1)
-
 // Dosing Time Macros
 #define DOSING_START_TIME			  (13) // 13:00
 #define DOSING_END_TIME				  (14)//  14:00
@@ -64,7 +60,7 @@
 #define HIGH 							(1ul)
 #define LOW								(0ul)
 #define MAC_ID_CMD_LENGTH				(6ul)
-#define DATA_CMD_LENGTH					(20ul)
+#define DATA_CMD_LENGTH					(21ul)
 #define LEDC_DUTY_RES                (LEDC_TIMER_10_BIT)
 
 // Salt Dosing MACROS
@@ -367,7 +363,6 @@ static volatile float Electrode_voltage , Electrode_current;
 static volatile float temperature_value1 , temperature_value2;
 // Flow Meter Value Dosing Value in %
 static volatile float Flow_Rate , Dosing_speed;
-static uint8_t time_sync_done_f = 0;
 // Debug Variables / Function
 time_t now ;
 struct tm current_time;
@@ -419,7 +414,7 @@ static void polarity_controller(void);
 #endif
 static void Get_Flow_rate(void);
 static void monitor_task_stack(void);
-
+static uint8_t time_sync_done_f = 0;
 
 portMUX_TYPE spinlock = portMUX_INITIALIZER_UNLOCKED;
 // Comment for the future Functions
@@ -500,19 +495,6 @@ void app_main(void)
     // Initialize UART
 	Uart_init();
 
-
-	#if RESET_COMMAND_REQ == 1
-	char *reset_str = "TIME";
-	int len = uart_write_bytes(uart_num1, (const char*)reset_str, strlen(reset_str));   // RESET COMMAND
-	if(len == strlen(reset_str))
-	{
-		printf("Time is sent Reset Occur\n");
-	}
-	else
-	{
-		printf("Error In sending the time\n");
-	}
-	#endif
 
 #if RS485_MODBUS_COMM_REQ == 0
 	// ADC INIT (One - Shot Mode)
@@ -1316,6 +1298,7 @@ static void v_NVS_data_save_task(void *pvParameters)
         {
             ESP_LOGI("NVS","No changes detected, skipping save");
         }
+
 
 		if(time_sync_done_f == 1) // Time sync done 
 		{
@@ -2224,8 +2207,10 @@ data_Buffer[15] = (nvs_data.timer_counter & 0xFF);
 
 memcpy(&data_Buffer[16], &system_op_error_code, sizeof(system_op_error_code)); // Error Code 
 
+data_Buffer[20] = time_sync_done_f; // It tells that time sync is done or Not , 0: No Time Sync 1 : Time Sync 
+
 Electrode_current =0; Electrode_voltage =0;
-int bytes_sent = uart_write_bytes(uart_num1, (const char*)data_Buffer, DATA_CMD_LENGTH); // 20 Bytes is a Data Packet Length
+int bytes_sent = uart_write_bytes(uart_num1, (const char*)data_Buffer, DATA_CMD_LENGTH); // 21 Bytes is a Data Packet Length
 if (bytes_sent != DATA_CMD_LENGTH) {
     ESP_LOGE("Error", "UART Send Failed (%d bytes sent)", bytes_sent);
     return;
@@ -2236,13 +2221,13 @@ ESP_LOGI("DATA Command", "Packet sent successfully (%d bytes)", bytes_sent);
 
 static void data_transfer(void)
 {
-uint8_t response[10] = {0};
+uint8_t response[12] = {0};
 int len = uart_read_bytes(uart_num1, response, sizeof(response), pdMS_TO_TICKS(300));
 
-if (len == 4)
+if (len == 4 || len == 11)
 {
     // Fast validation — single conditional
-    if (response[0] == 0xAA && response[3] == 0xFF)
+    if (len == 4 && response[0] == 0xAA && response[3] == 0xFF)
     {
         uint8_t action_cmd = response[1];
 
@@ -2268,35 +2253,43 @@ if (len == 4)
                 break;
         }
     }
+	else if(len == 11 && response[0] == 0xAA && response[10] == 0xFF)
+	{
+        uint8_t action_cmd = response[1];
+
+        switch (action_cmd)
+        {			
+            case STATUS_GET_COMMAND:
+                ESP_LOGI("TDCMD", "Status command");
+				current_time.tm_year = ((response[3]*100 + response[4])- 1900);
+				current_time.tm_mon = response[5];
+				current_time.tm_mday = response[6];
+				current_time.tm_hour = response[7];
+				current_time.tm_min = response[8];
+				current_time.tm_sec = response[9];	
+				current_time.tm_isdst = -1;
+				time_t epoch = mktime(&current_time);
+				if (epoch != -1) {
+					struct timeval tv = {
+						.tv_sec = epoch,
+						.tv_usec = 0
+					};
+					settimeofday(&tv, NULL);   //RTC starts auto-updating
+					time_sync_done_f = 1;
+				}
+				ESP_LOGI("Time","RTC Set: %04d-%02d-%02d %02d:%02d:%02d",current_time.tm_year + 1900,current_time.tm_mon + 1,current_time.tm_mday,current_time.tm_hour,current_time.tm_min,current_time.tm_sec);							
+                send_status_data();
+                break;
+
+            default:
+                ESP_LOGW("CMD", "Unknown command: %02X", action_cmd);
+                break;
+        }
+	}
     else
     {
         ESP_LOGW("CMD", "Invalid frame: %02X %02X %02X %02X",
                  response[0], response[1], response[2], response[3]);
     }
-}
-else if(len == 9) // if we receive the 9 bytes then it means we receive the time from the IOT Reader 
-{
-    if(response[0] == 0xAA   && response[8] == 0xFF)
-	{
-		current_time.tm_year = (((response[1]*100)+response[2]) - 1900);  
-		current_time.tm_mon  = (response[3]-1);
-		current_time.tm_mday = response[4];
-		current_time.tm_hour = response[5];
-		current_time.tm_min  = response[6];
-		current_time.tm_sec  = response[7];
-		current_time.tm_isdst = -1;
-		time_t epoch = mktime(&current_time);
-		if (epoch != -1) {
-			struct timeval tv = {
-				.tv_sec = epoch,
-				.tv_usec = 0
-			};
-			settimeofday(&tv, NULL);   //RTC starts auto-updating
-			time_sync_done_f = 1;
-		}
-		ESP_LOGI("Time",
-			"RTC Set: %04d-%02d-%02d %02d:%02d:%02d",current_time.tm_year + 1900,current_time.tm_mon + 1,current_time.tm_mday,current_time.tm_hour,
-			current_time.tm_min,current_time.tm_sec);
-	}
 }	
 }
