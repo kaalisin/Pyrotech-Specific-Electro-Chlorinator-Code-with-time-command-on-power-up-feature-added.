@@ -169,7 +169,7 @@
 #define CST_FILLING_TIMER_NO_ERROR_BIT  (1<<19)
 
 // Dosing Start Bits
-#define DOSING_TIME_BIT					(1<<20)
+#define DOSING_TIME_BIT					(1<<23)
 #define DOSING_STOP_TIME_BIT			(1<<21)
 #define DOSING_OFF_BIT					(1<<22)
 
